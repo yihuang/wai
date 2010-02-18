@@ -41,7 +41,7 @@ import qualified Safe
 import Network.Socket.SendFile
 import Control.Arrow (first)
 
-run :: Port -> Application -> IO ()
+run :: Port -> Application a Handle -> IO ()
 run port = withSocketsDo .
     bracket
         (listenOn $ PortNumber $ fromIntegral port)
@@ -49,13 +49,13 @@ run port = withSocketsDo .
         serveConnections port
 type Port = Int
 
-serveConnections :: Port -> Application -> Socket -> IO ()
+serveConnections :: Port -> Application a Handle -> Socket -> IO ()
 serveConnections port app socket = do
     (conn, remoteHost', _) <- accept socket
     _ <- forkIO $ serveConnection port app conn remoteHost'
     serveConnections port app socket
 
-serveConnection :: Port -> Application -> Handle -> String -> IO ()
+serveConnection :: Port -> Application a Handle -> Handle -> String -> IO ()
 serveConnection port app conn remoteHost' =
     finally
         serveConnection'
@@ -66,7 +66,7 @@ serveConnection port app conn remoteHost' =
             res <- app env
             sendResponse conn res
 
-hParseRequest :: Port -> Handle -> String -> IO Request
+hParseRequest :: Port -> Handle -> String -> IO (Request a)
 hParseRequest port conn remoteHost' = do
     headers' <- takeUntilBlank conn id
     parseRequest port headers' conn remoteHost'
@@ -99,7 +99,7 @@ parseRequest :: Port
              -> [BS.ByteString]
              -> Handle
              -> String
-             -> IO Request
+             -> IO (Request a)
 parseRequest port lines' handle remoteHost' = do
     case lines' of
         (_:_:_) -> return ()
@@ -135,17 +135,23 @@ parseRequest port lines' handle remoteHost' = do
                 }
 
 requestBodyHandle :: Handle -> MVar Int -> Enumerator a
-requestBodyHandle h mlen iter accum = modifyMVar mlen (helper accum) where
-    helper a 0 = return (0, Right a)
-    helper a len = do
-        let maxChunkSize = 1024
-        bs <- BS.hGet h $ min len maxChunkSize
-        let newLen = len - BS.length bs
+requestBodyHandle h mlen self iter accum = do
+    mbs <- modifyMVar mlen helper
+    case mbs of
+      Nothing -> return $ Right accum
+      Just bs -> do
         putStrLn $ "reading a chunk of size " ++ show (BS.length bs)
-        ea' <- iter a bs
-        case ea' of
-            Left a' -> return (newLen, Left a')
-            Right a' -> helper a' newLen
+        eaccum' <- iter accum bs
+        case eaccum' of
+            Left accum' -> return $ Left accum'
+            Right accum' -> self iter accum'
+      where
+        helper 0 = return (0, Nothing)
+        helper len = do
+            let maxChunkSize = 20 -- FIXME
+            bs <- BS.hGet h $ min len maxChunkSize
+            let newLen = len - BS.length bs
+            return (newLen, Just bs)
 
 parseFirst :: (StringLike s, MonadFailure InvalidRequest m) =>
               s
@@ -160,7 +166,7 @@ parseFirst s = do
     let (rpath, qstring) = SL.breakChar '?' query
     return (method, rpath, qstring)
 
-sendResponse :: Handle -> Response -> IO ()
+sendResponse :: Handle -> Response Handle -> IO ()
 sendResponse h res = do
     BS.hPut h $ SL.pack "HTTP/1.1 "
     BS.hPut h $ SL.pack $ show $ statusCode $ status res
@@ -170,7 +176,7 @@ sendResponse h res = do
     BS.hPut h $ SL.pack "\r\n"
     case responseBody res of
         Left fp -> unsafeSendFile h fp
-        Right enum -> enum myPut h >> return ()
+        Right enum -> fix enum myPut h >> return ()
     where
         myPut _ bs = do
             putStrLn $ "sending a chunk of size " ++ show (BS.length bs)

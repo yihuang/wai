@@ -1,4 +1,3 @@
-{-# LANGUAGE Rank2Types #-}
 {-|
 
 This module defines a generic web application interface. It is a common
@@ -57,6 +56,9 @@ module Network.Wai
     , statusMessage
       -- * Enumerator
     , Enumerator
+    , RecEnumerator
+    , Iteratee
+    , fix
       -- * WAI interface
     , Request (..)
     , Response (..)
@@ -341,13 +343,16 @@ statusMessage (Status _ m) = m
 -- 'Enumerator' may only be called once. While this requirement puts a bit of a
 -- strain on the caller in some situations, it saves a large amount of
 -- complication- and thus performance- on the producer.
-type Enumerator a = (a -> B.ByteString -> IO (Either a a))
-                 -> a
-                 -> IO (Either a a)
+type Enumerator a = RecEnumerator a -> RecEnumerator a
+type RecEnumerator a = Iteratee a -> a -> IO (Either a a)
+type Iteratee a = a -> B.ByteString -> IO (Either a a)
+
+fix :: Enumerator a -> RecEnumerator a
+fix f = f g where g = f g
 
 -- | Information on the request sent by the client. This abstracts away the
 -- details of the underlying implementation.
-data Request = Request
+data Request a = Request
   {  requestMethod  :: Method
   ,  httpVersion    :: HttpVersion
   -- | Extra path information sent by the client. The meaning varies slightly
@@ -361,23 +366,23 @@ data Request = Request
   ,  serverPort     :: Int
   ,  requestHeaders :: [(RequestHeader, B.ByteString)]
   ,  urlScheme      :: UrlScheme
-  ,  requestBody    :: forall a. Enumerator a
+  ,  requestBody    :: Enumerator a
   ,  errorHandler   :: String -> IO ()
   -- | The client\'s host information.
   ,  remoteHost     :: B.ByteString
   }
 
-data Response = Response
+data Response a = Response
   { status          :: Status
   , responseHeaders :: [(ResponseHeader, B.ByteString)]
   -- | A common optimization is to use the sendfile system call when sending
   -- files from the disk. This datatype facilitates this optimization; if
   -- 'Left' is returns, the server will send the file from the disk by whatever
   -- means it wishes. If 'Right', it will call the 'Enumerator'.
-  , responseBody    :: forall a. Either FilePath (Enumerator a)
+  , responseBody    :: Either FilePath (Enumerator a)
   }
 
-type Application = Request -> IO Response
+type Application a b = Request a -> IO (Response b)
 
 -- | Middleware is a component that sits between the server and application. It can do such tasks as GZIP encoding or response caching. What follows is the general definition of middleware, though a middleware author should feel free to modify this.
 --
@@ -390,4 +395,4 @@ type Application = Request -> IO Response
 --
 -- Here, instead of taking a standard 'Application' as its first argument, the
 -- middleware takes a function which consumes the session information as well.
-type Middleware = Application -> Application
+type Middleware a b = Application a b -> Application a b

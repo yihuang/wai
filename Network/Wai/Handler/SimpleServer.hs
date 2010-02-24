@@ -27,7 +27,7 @@ import Network
     , withSocketsDo)
 import Control.Exception (bracket, finally, Exception)
 import System.IO (Handle, hClose)
-import Control.Concurrent (forkIO)
+import Control.Concurrent
 import Control.Monad (unless)
 import Data.Maybe (isJust, fromJust, fromMaybe)
 
@@ -119,6 +119,7 @@ parseRequest port lines' handle remoteHost' = do
                 bs <- lookup ReqContentLength heads
                 let str = SL.unpack bs
                 Safe.readMay str
+    mlen <- newMVar len
     let (serverName', _) = SL.breakChar ':' host
     return $ Request
                 { requestMethod = method
@@ -129,23 +130,29 @@ parseRequest port lines' handle remoteHost' = do
                 , serverPort = port
                 , requestHeaders = heads
                 , urlScheme = HTTP
-                , requestBody = requestBodyHandle handle len
+                , requestBody = requestBodyHandle handle mlen
                 , errorHandler = System.IO.hPutStr System.IO.stderr
                 , remoteHost = B8.pack remoteHost'
                 }
 
-requestBodyHandle :: Handle -> Int -> Enumerator
-requestBodyHandle h len0 = Enumerator $ helper len0 where
-    helper 0 _ _ a = return $ Right a
-    helper len rec iter a = do
+requestBodyHandle :: Handle -> MVar Int -> Enumerator
+requestBodyHandle h mlen = Enumerator helper where
+    helper rec iter a = do
+        res <- modifyMVar mlen $ helper' iter a
+        case res of
+            Left x -> return x
+            Right x -> rec iter x
+    helper' _ a 0 = return (0, Left $ Right a)
+    helper' iter a len = do
         let maxChunkSize = 1024
         bs <- BS.hGet h $ min len maxChunkSize
         let newLen = len - BS.length bs
         putStrLn $ "reading a chunk of size " ++ show (BS.length bs)
+                ++ ", remaining: " ++ show newLen
         ea' <- iter a bs
         case ea' of
-            Left a' -> return $ Left a'
-            Right a' -> rec iter a'
+            Left a' -> return (newLen, Left $ Left a')
+            Right a' -> return (newLen, Right a')
 
 parseFirst :: (StringLike s, MonadFailure InvalidRequest m) =>
               s

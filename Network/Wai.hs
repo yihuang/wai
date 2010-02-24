@@ -57,6 +57,8 @@ module Network.Wai
     , statusMessage
       -- * Enumerator
     , Enumerator (..)
+    , Enumerator'
+    , Iteratee
       -- * WAI interface
     , Request (..)
     , Response (..)
@@ -342,10 +344,19 @@ statusMessage (Status _ m) = m
 -- strain on the caller in some situations, it saves a large amount of
 -- complication- and thus performance- on the producer.
 newtype Enumerator = Enumerator { runEnumerator :: forall a.
-              (a -> B.ByteString -> IO (Either a a))
+                    (Iteratee a -> a -> IO (Either a a))
+                 -> Iteratee a
                  -> a
                  -> IO (Either a a)
 }
+
+type Enumerator' a =
+                    (Iteratee a -> a -> IO (Either a a))
+                 -> Iteratee a
+                 -> a
+                 -> IO (Either a a)
+
+type Iteratee a = a -> B.ByteString -> IO (Either a a)
 
 -- | Information on the request sent by the client. This abstracts away the
 -- details of the underlying implementation.

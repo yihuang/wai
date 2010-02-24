@@ -40,6 +40,7 @@ import qualified Web.Encodings.StringLike as SL
 import qualified Safe
 import Network.Socket.SendFile
 import Control.Arrow (first)
+import Data.Function (fix)
 
 run :: Port -> Application -> IO ()
 run port = withSocketsDo .
@@ -135,8 +136,8 @@ parseRequest port lines' handle remoteHost' = do
 
 requestBodyHandle :: Handle -> Int -> Enumerator
 requestBodyHandle h len0 = Enumerator $ helper len0 where
-    helper 0 _ a = return $ Right a
-    helper len iter a = do
+    helper 0 _ _ a = return $ Right a
+    helper len rec iter a = do
         let maxChunkSize = 1024
         bs <- BS.hGet h $ min len maxChunkSize
         let newLen = len - BS.length bs
@@ -144,7 +145,7 @@ requestBodyHandle h len0 = Enumerator $ helper len0 where
         ea' <- iter a bs
         case ea' of
             Left a' -> return $ Left a'
-            Right a' -> helper newLen iter a'
+            Right a' -> rec iter a'
 
 parseFirst :: (StringLike s, MonadFailure InvalidRequest m) =>
               s
@@ -169,7 +170,7 @@ sendResponse h res = do
     BS.hPut h $ SL.pack "\r\n"
     case responseBody res of
         Left fp -> unsafeSendFile h fp
-        Right (Enumerator enum) -> enum myPut h >> return ()
+        Right (Enumerator enum) -> fix enum myPut h >> return ()
     where
         myPut _ bs = do
             putStrLn $ "sending a chunk of size " ++ show (BS.length bs)

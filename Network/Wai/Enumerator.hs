@@ -25,11 +25,12 @@ import System.IO (withBinaryFile, IOMode (ReadMode), Handle, hIsEOF)
 import Data.ByteString.Lazy.Internal (defaultChunkSize)
 import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar
+import Data.Function (fix)
 
 -- | Performs a specified conversion on each 'B.ByteString' output by an
 -- enumerator.
 mapE :: (B.ByteString -> B.ByteString) -> Enumerator -> Enumerator
-mapE f (Enumerator e) = Enumerator $ \iter -> e (iter' iter) where
+mapE f (Enumerator e) = Enumerator $ \rec iter -> e rec (iter' iter) where
     iter' iter a = iter a . f
 
 -- | This uses 'unsafeInterleaveIO' to lazily read from an enumerator. All
@@ -48,21 +49,29 @@ toLBS e = do
                         return $ x' : xs
 
 -- | This function safely converts a lazy bytestring into an enumerator.
-fromLBS :: L.ByteString -> Enumerator
-fromLBS lbs = Enumerator $ \iter a0 -> helper iter a0 $ L.toChunks lbs where
-    helper _ a [] = return $ Right a
-    helper iter a (x:xs) = do
+fromLBS :: L.ByteString -> IO Enumerator
+fromLBS lbs = do
+  mbss <- newMVar $ L.toChunks lbs
+  return $ Enumerator $ go mbss where
+    go mbss rec iter a = do
+      res <- modifyMVar mbss $ go' iter a
+      case res of
+        Left x -> return x
+        Right x -> rec iter x
+    go' _ a [] = return $ ([], Left $ Right a)
+    go' iter a (x:xs) = do
         ea <- iter a x
         case ea of
-            Left a' -> return $ Left a'
-            Right a' -> helper iter a' xs
+            Left a' -> return $ (xs, Left $ Left a')
+            Right a' -> return $ (xs, Right a')
 
 -- | Same as 'fromLBS', but the lazy bytestring is in the IO monad. This allows
 -- you to lazily read a file into memory, perform some mapping on the data and
 -- convert it into an enumerator.
 fromLBS' :: IO L.ByteString -> Enumerator
-fromLBS' lbs' = Enumerator $ \iter a0 -> lbs' >>= \lbs ->
-    runEnumerator (fromLBS lbs) iter a0
+fromLBS' lbs' = Enumerator $ \rec iter a0 -> lbs' >>= \lbs -> do
+    Enumerator enum <- fromLBS lbs
+    enum rec iter a0
 
 -- | A source is a more standard way of accessing data from an 'Enumerator'.
 -- Each time you call it, it returns the next chunk of data if available, or
@@ -70,7 +79,7 @@ fromLBS' lbs' = Enumerator $ \iter a0 -> lbs' >>= \lbs ->
 toSource :: Enumerator -> IO (IO (Maybe B.ByteString))
 toSource (Enumerator e) = do
     buffer <- newEmptyMVar
-    _ <- forkIO $ e (helper buffer) () >> putMVar buffer Nothing
+    _ <- forkIO $ fix e (helper buffer) () >> putMVar buffer Nothing
     return $ source buffer
       where
         helper :: MVar (Maybe B.ByteString)
@@ -95,7 +104,7 @@ toSource (Enumerator e) = do
 -- 'defaultChunkSize' from the bytestring package to determine the largest
 -- chunk to take.
 fromHandle :: Handle -> Enumerator
-fromHandle h = Enumerator $ \iter a -> do
+fromHandle h = Enumerator $ \rec iter a -> do
     eof <- hIsEOF h
     if eof
         then return $ Right a
@@ -104,12 +113,12 @@ fromHandle h = Enumerator $ \iter a -> do
             ea' <- iter a bs
             case ea' of
                 Left a' -> return $ Left a'
-                Right a' -> runEnumerator (fromHandle h) iter a'
+                Right a' -> rec iter a'
 
 -- | A little wrapper around 'fromHandle' which first opens a file for reading.
 fromFile :: FilePath -> Enumerator
-fromFile fp = Enumerator $ \iter a0 -> withBinaryFile fp ReadMode $ \h ->
-    runEnumerator (fromHandle h) iter a0
+fromFile fp = Enumerator $ \rec iter a0 -> withBinaryFile fp ReadMode $
+    \h -> runEnumerator (fromHandle h) rec iter a0
 
 -- | Since the response body is defined as an 'Either' 'FilePath' 'Enumerator',
 -- this function simply reduces the whole operator to an enumerator. This can

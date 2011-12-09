@@ -17,6 +17,7 @@ module Data.Conduit
     , ($$)
     , ($=)
     , (=$)
+    , (>==>)
       -- * Helper functions
     , mkSource
     ) where
@@ -213,3 +214,13 @@ pipe =$ Sink msink = Sink $ do
             SinkResult _thisislost mres <- sink stream'
             return $ SinkResult leftover mres
         SinkNoData mres -> return $ SinkNoData mres
+
+infixr 1 >==>
+
+(>==>) :: MonadBaseControl IO m => Source m a -> Source m a -> Source m a
+msource1 >==> msource2 = mkSource $ do
+    source1 <- unSource msource1
+    stream <- sourcePull source1
+    case stream of
+        EOF -> unSource msource2 >>= sourcePull
+        _   -> return stream
